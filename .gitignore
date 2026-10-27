@@ -1,0 +1,28 @@
+node_modules/
+lib/
+*.log
+.DS_Store
+.workbuddy
+.opencode
+.trae
+.soloncode
+
+# Rust native addon
+rust/target/
+rust/index.node
+rust/index.cjs
+rust/index.d.ts
+rust/*.dll
+rust/*.pdb
+rust/*.exp
+rust/*.lib
+rust/ccache/
+
+# Kerberos ccache（可能含票据，绝不入库）
+*_ccache
+*.ccache
+krb5cc_*
+
+# 本地测试集群配置（含 keytab 路径等敏感信息，绝不入库）
+.e2e-cluster.local.json
+*.local.json

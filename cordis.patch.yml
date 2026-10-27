@@ -1,0 +1,11 @@
+# dsh-offexplorer 的 bundle 层 patch：把插件注册进配置树。
+#
+# loader.import('dsh-offexplorer') 解析到 lib/index.js：
+#   - 加载 rust/ 构建出的 napi 原生模块（lib/native/index.cjs + .node）；
+#   - 注册 /api/offexplorer/* 精确 Fetch 路由（connection.fetch.register）；
+#   - 注册 kafka agent 工具（ctx.get('tools').register）。
+#
+# 注意：patch 按 id 整体替换 config，不会深合并。改本文件请保留整行。
+- insert:
+    - id: offexplorer
+      name: dsh-offexplorer

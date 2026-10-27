@@ -1,0 +1,31 @@
+[package]
+name = "dsh-offexplorer-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "napi-rs native addon exposing Kafka (rdkafka) operations to the dsh-offexplorer plugin"
+license = "Apache-2.0"
+
+[lib]
+name = "dsh_offexplorer_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", features = ["napi8", "tokio_rt"] }
+napi-derive = "3"
+tokio = { version = "1", features = ["rt"] }
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 本地 vendored 的 rdkafka-sys：额外带一个直接调用 MIT Kerberos
+# （gssapi64.dll，读 ccache 文件、保留 SPN 大小写）的 SASL GSSAPI provider。
+# Windows 上 librdkafka 自带的 SSPI provider 会把主机名规范化为大写，
+# 无法对接大小写敏感 SPN 的 MIT KDC。
+[patch.crates-io]
+rdkafka-sys = { path = "vendor/rdkafka-sys" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
