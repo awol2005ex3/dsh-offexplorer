@@ -94,9 +94,9 @@ export const DEFAULTS = {
 
 export const OffexplorerConfigSchema = z.object({
   clusters: z.string().default(DEFAULTS.clusters).volatile().description(
-    'Kafka 集群列表（JSON 数组）。示例：[{"id":"prod","bootstrapServers":["broker1:9092"],' +
-    '"security":"SASL_PLAINTEXT","sasl":"GSSAPI","krb":{"principal":"user@REALM",' +
-    '"keytabPath":"C:/keys/user.keytab","autoKinit":true}}]。' +
+    'Kafka 集群列表（JSON 数组，由「设置 → 插件 → Offset Explorer」表单维护）。示例：[{"id":"prod",' +
+    '"bootstrapServers":["broker1:9092"],"security":"SASL_PLAINTEXT","sasl":"GSSAPI",' +
+    '"krb":{"principal":"user@REALM","keytabPath":"C:/keys/user.keytab","autoKinit":true}}]。' +
     '也兼容 Offset Explorer connections.json 的 PascalCase 字段。',
   ),
   defaultCluster: z.string().default(DEFAULTS.defaultCluster).volatile().description(

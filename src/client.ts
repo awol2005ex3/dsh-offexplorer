@@ -228,7 +228,7 @@ async function callRpc(conn: any, endpoint: string, args?: Record<string, unknow
 
 /* ── 配置读写通道 ──────────────────────────────────────────────────────── */
 
-export interface SettingsSnapshot {
+interface SettingsSnapshot {
   clusters?: string
   defaultCluster?: string
   maxRows?: number
@@ -322,13 +322,20 @@ function configFormsChannel(ctx: any): SettingsChannel | undefined {
   }
 
   return {
+    writable: true,
     read: async () => {
       const snap = await waitReady()
       const value = snap.value ?? {}
       let clusters = value.clusters
       if (Array.isArray(clusters)) clusters = JSON.stringify(clusters, null, 2)
       if (typeof clusters !== 'string') clusters = '[]'
-      return { clusters, defaultCluster: String(value.defaultCluster ?? '') }
+      return {
+        clusters,
+        defaultCluster: String(value.defaultCluster ?? ''),
+        maxRows: Number(value.maxRows ?? 100),
+        maxPerPartition: Number(value.maxPerPartition ?? 50),
+        maxValueBytes: Number(value.maxValueBytes ?? 4096),
+      }
     },
     write: async (patch) => {
       const snap = await waitReady()
@@ -348,15 +355,23 @@ function createChannel(ctx: any, conn: any): SettingsChannel {
     if (!channel) throw new Error('没有可用的配置读写通道（configForms / RPC 均不可用）')
     return channel
   }
-  return { read: () => required().read(), write: (patch) => required().write(patch) }
+  return {
+    get writable(): boolean {
+      try {
+        return resolve()?.writable === true
+      } catch {
+        return false
+      }
+    },
+    read: () => required().read(),
+    write: (patch) => required().write(patch),
+  }
 }
 
 /* ── 样式 ─────────────────────────────────────────────────────────────── */
 
 const PANEL_CSS =
   'color:var(--fg,#1f2328);font-size:13px;line-height:1.5;display:flex;flex-direction:column;gap:8px;'
-const LABEL_CSS = 'display:block;font-weight:600;margin-top:4px;'
-const HINT_CSS = 'display:block;color:var(--fg-muted,#57606a);font-size:12px;margin:2px 0;'
 const INPUT_CSS =
   'box-sizing:border-box;padding:5px 8px;font-size:12.5px;font-family:inherit;' +
   'border:1px solid rgba(127,127,127,.4);border-radius:6px;background:var(--bg,#fff);color:inherit;'
@@ -411,6 +426,303 @@ function renderTable(table: HTMLTableElement, head: string[], rows: TableRow[]):
     tbody.append(tr)
   }
   table.append(tbody)
+}
+
+/* ── 集群草稿（表单 ⇄ 宿主 JSON） ──────────────────────────────────────── */
+
+type JsonRow = Record<string, unknown>
+
+const SECURITY_TYPES = ['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL']
+const SASL_MECHANISMS = ['GSSAPI', 'PLAIN', 'SCRAM-SHA-256', 'SCRAM-SHA-512']
+
+interface KrbDraft {
+  krb5ConfPath: string
+  realm: string
+  credSource: string
+  ccachePath: string
+  keytabPath: string
+  principal: string
+  username: string
+  password: string
+  autoKinit: boolean
+  kinitPath: string
+  service: string
+  hostTemplate: string
+  resolve: string
+  disablePafxFast: boolean
+  forceCanonical: boolean
+}
+
+interface TlsDraft {
+  caPemPath: string
+  clientCertPemPath: string
+  clientKeyPemPath: string
+  serverName: string
+  insecureSkipVerify: boolean
+}
+
+interface ClusterDraft {
+  id: string
+  name: string
+  group: string
+  description: string
+  bootstrap: string
+  kafkaVersion: string
+  security: string
+  sasl: string
+  krb: KrbDraft
+  plainUser: string
+  plainPass: string
+  scramAuthzId: string
+  tls: TlsDraft
+  schemaRegistryUrl: string
+  maxMessageBytes: number
+  allowAutoCreateTopic: boolean
+  consumerGroup: string
+  dialTimeoutMs: number
+  requestTimeoutMs: number
+  /** key=value 每行一条；保存时转成 extraConfig 的 JSON 对象。 */
+  extraConfig: string
+}
+
+function rowOf(value: unknown): JsonRow | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as JsonRow)
+    : undefined
+}
+
+function getString(row: JsonRow, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = row[key]
+    if (typeof value === 'string') return value.trim()
+    if (typeof value === 'number') return String(value)
+  }
+  return ''
+}
+
+function getNumber(row: JsonRow, fallback: number, ...keys: string[]): number {
+  for (const key of keys) {
+    const value = row[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) return Number(value)
+  }
+  return fallback
+}
+
+function getBool(row: JsonRow, fallback: boolean, ...keys: string[]): boolean {
+  for (const key of keys) {
+    const value = row[key]
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const text = value.trim().toLowerCase()
+      if (text === 'true' || text === '1') return true
+      if (text === 'false' || text === '0') return false
+    }
+  }
+  return fallback
+}
+
+function serversText(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === 'string').map((v) => v.trim()).filter(Boolean).join(', ')
+  }
+  if (typeof value === 'string') return value.trim()
+  return ''
+}
+
+function splitServers(text: string): string[] {
+  return text.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean)
+}
+
+function usesSasl(security: string): boolean {
+  return security === 'SASL_PLAINTEXT' || security === 'SASL_SSL'
+}
+
+function usesTls(security: string): boolean {
+  return security === 'SSL' || security === 'SASL_SSL'
+}
+
+function blankDraft(): ClusterDraft {
+  return {
+    id: '',
+    name: '',
+    group: '',
+    description: '',
+    bootstrap: '',
+    kafkaVersion: '',
+    security: 'PLAINTEXT',
+    sasl: 'GSSAPI',
+    krb: {
+      krb5ConfPath: '',
+      realm: '',
+      credSource: 'ccache',
+      ccachePath: '',
+      keytabPath: '',
+      principal: '',
+      username: '',
+      password: '',
+      autoKinit: false,
+      kinitPath: '',
+      service: '',
+      hostTemplate: '',
+      resolve: 'literal',
+      disablePafxFast: false,
+      forceCanonical: false,
+    },
+    plainUser: '',
+    plainPass: '',
+    scramAuthzId: '',
+    tls: {
+      caPemPath: '',
+      clientCertPemPath: '',
+      clientKeyPemPath: '',
+      serverName: '',
+      insecureSkipVerify: false,
+    },
+    schemaRegistryUrl: '',
+    maxMessageBytes: 1024 * 1024,
+    allowAutoCreateTopic: false,
+    consumerGroup: '',
+    dialTimeoutMs: 10_000,
+    requestTimeoutMs: 20_000,
+    extraConfig: '',
+  }
+}
+
+/** 兼容 camelCase / PascalCase（Offset Explorer connections.json）。 */
+function draftFromRow(row: JsonRow): ClusterDraft {
+  const draft = blankDraft()
+  const krb = rowOf(row.krb ?? row.Krb ?? row.kerberos) ?? {}
+  const tls = rowOf(row.tls ?? row.TLS) ?? {}
+  draft.id = getString(row, 'id', 'Id', 'ID')
+  draft.name = getString(row, 'name', 'Name')
+  draft.group = getString(row, 'group', 'Group')
+  draft.description = getString(row, 'description', 'Description')
+  draft.bootstrap = serversText(row.bootstrapServers ?? row.BootstrapServers ?? row.bootstrap_servers)
+  draft.kafkaVersion = getString(row, 'kafkaVersion', 'KafkaVersion')
+  draft.security = (getString(row, 'security', 'Security', 'securityType') || 'PLAINTEXT').toUpperCase()
+  draft.sasl = (getString(row, 'sasl', 'SASL', 'saslMechanism') || 'GSSAPI').toUpperCase()
+  draft.krb = {
+    krb5ConfPath: getString(krb, 'krb5ConfPath', 'KRB5ConfPath', 'Krb5ConfPath'),
+    realm: getString(krb, 'realm', 'Realm'),
+    credSource: getString(krb, 'credSource', 'CredSource') || 'ccache',
+    ccachePath: getString(krb, 'ccachePath', 'CCachePath', 'CcachePath'),
+    keytabPath: getString(krb, 'keytabPath', 'KeytabPath'),
+    principal: getString(krb, 'principal', 'Principal'),
+    username: getString(krb, 'username', 'Username'),
+    password: getString(krb, 'password', 'Password'),
+    autoKinit: getBool(krb, false, 'autoKinit', 'AutoKinit'),
+    kinitPath: getString(krb, 'kinitPath', 'KinitPath'),
+    service: getString(krb, 'service', 'Service'),
+    hostTemplate: getString(krb, 'hostTemplate', 'HostTemplate'),
+    resolve: getString(krb, 'resolve', 'Resolve') || 'literal',
+    disablePafxFast: getBool(krb, false, 'disablePafxFast', 'DisablePAFXFast'),
+    forceCanonical: getBool(krb, false, 'forceCanonical', 'ForceCanonical'),
+  }
+  draft.plainUser = getString(row, 'plainUser', 'PlainUser')
+  draft.plainPass = getString(row, 'plainPass', 'PlainPass')
+  draft.scramAuthzId = getString(row, 'scramAuthzId', 'SCRAMAuthzID')
+  draft.tls = {
+    caPemPath: getString(tls, 'caPemPath', 'CAPemPath', 'CaPemPath'),
+    clientCertPemPath: getString(tls, 'clientCertPemPath', 'ClientCertPemPath'),
+    clientKeyPemPath: getString(tls, 'clientKeyPemPath', 'ClientKeyPemPath'),
+    serverName: getString(tls, 'serverName', 'ServerName'),
+    insecureSkipVerify: getBool(tls, false, 'insecureSkipVerify', 'InsecureSkipVerify'),
+  }
+  draft.schemaRegistryUrl = getString(row, 'schemaRegistryUrl', 'SchemaRegistryURL')
+  draft.maxMessageBytes = getNumber(row, 1024 * 1024, 'maxMessageBytes', 'MaxMessageBytes')
+  draft.allowAutoCreateTopic = getBool(row, false, 'allowAutoCreateTopic', 'AllowAutoCreateTopic')
+  draft.consumerGroup = getString(row, 'consumerGroup', 'ConsumerGroup')
+  draft.dialTimeoutMs = getNumber(row, 10_000, 'dialTimeoutMs', 'DialTimeoutMs')
+  draft.requestTimeoutMs = getNumber(row, 20_000, 'requestTimeoutMs', 'RequestTimeoutMs')
+  draft.extraConfig = extraConfigToLines(getString(row, 'extraConfig', 'ExtraConfig'))
+  return draft
+}
+
+/** 表单草稿 → 宿主 clusters 里的一项（camelCase 规范形状）。 */
+function draftToRow(draft: ClusterDraft): JsonRow {
+  return {
+    id: draft.id,
+    name: draft.name,
+    group: draft.group,
+    description: draft.description,
+    bootstrapServers: splitServers(draft.bootstrap),
+    kafkaVersion: draft.kafkaVersion,
+    security: draft.security,
+    sasl: draft.sasl,
+    krb: { ...draft.krb },
+    plainUser: draft.plainUser,
+    plainPass: draft.plainPass,
+    scramAuthzId: draft.scramAuthzId,
+    tls: { ...draft.tls },
+    schemaRegistryUrl: draft.schemaRegistryUrl,
+    maxMessageBytes: draft.maxMessageBytes,
+    allowAutoCreateTopic: draft.allowAutoCreateTopic,
+    consumerGroup: draft.consumerGroup,
+    dialTimeoutMs: draft.dialTimeoutMs,
+    requestTimeoutMs: draft.requestTimeoutMs,
+    extraConfig: linesToExtraConfig(draft.extraConfig).json,
+  }
+}
+
+function cloneDraft(draft: ClusterDraft): ClusterDraft {
+  return JSON.parse(JSON.stringify(draft)) as ClusterDraft
+}
+
+/** 生成 id 片段；纯中文等无法转写的内容返回空串，交给调用方换下一个候选。 */
+function slugId(text: string): string {
+  return text.trim().replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function extraConfigToLines(raw: string): string {
+  const text = raw.trim()
+  if (!text) return ''
+  try {
+    const parsed: unknown = JSON.parse(text)
+    const obj = rowOf(parsed)
+    if (!obj) return text
+    return Object.entries(obj)
+      .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+      .join('\n')
+  } catch {
+    return text
+  }
+}
+
+function linesToExtraConfig(text: string): { json: string; error?: string } {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const obj: Record<string, string> = {}
+  for (const line of lines) {
+    const index = line.indexOf('=')
+    if (index <= 0) return { json: '', error: `“${line}” 不是 key=value 形式` }
+    obj[line.slice(0, index).trim()] = line.slice(index + 1).trim()
+  }
+  return { json: Object.keys(obj).length > 0 ? JSON.stringify(obj) : '' }
+}
+
+function validateDraft(draft: ClusterDraft): string | undefined {
+  if (!draft.name.trim()) return '集群名称不能为空'
+  if (splitServers(draft.bootstrap).length === 0) return 'Bootstrap Servers 不能为空'
+  if (!SECURITY_TYPES.includes(draft.security)) return `安全类型无效：${draft.security}`
+  if (usesSasl(draft.security)) {
+    if (!SASL_MECHANISMS.includes(draft.sasl)) return `SASL 机制无效：${draft.sasl}`
+    if (draft.sasl === 'GSSAPI') {
+      if (draft.krb.autoKinit) {
+        if (!draft.krb.keytabPath.trim()) return '勾选“自动 kinit”后必须填写 keytab 路径'
+        if (!draft.krb.principal.includes('@')) return '自动 kinit 需要带 realm 的 principal（user@REALM）'
+      }
+    } else {
+      if (!draft.plainUser.trim()) return `${draft.sasl} 需要填写用户名`
+      if (!draft.plainPass) return `${draft.sasl} 需要填写口令`
+    }
+  }
+  if (usesTls(draft.security)) {
+    const hasCert = draft.tls.clientCertPemPath.trim().length > 0
+    const hasKey = draft.tls.clientKeyPemPath.trim().length > 0
+    if (hasCert !== hasKey) return 'TLS 客户端证书与私钥必须同时填写'
+  }
+  if (!(draft.maxMessageBytes > 0)) return '最大消息字节必须为正数'
+  return undefined
 }
 
 /* ── 面板 ─────────────────────────────────────────────────────────────── */
@@ -610,39 +922,190 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
 
   viewHost.append(topicsView, groupsView, brokersView, healthView)
 
-  /* —— 配置区 —— */
-  const clustersInput = el('textarea', {
-    rows: '8',
+  /* —— 配置区：表单（对齐原版 Offset Explorer 连接对话框） —— */
+  const cfgStatus = el('div', { style: 'font-size:12px;color:var(--fg-muted,#57606a);' })
+  const cfgDirtyMark = el('span', { style: 'font-size:12px;color:#9a6700;' })
+
+  const sectionTitle = (text: string): HTMLElement =>
+    el('div', {
+      textContent: text,
+      style: 'font-weight:700;font-size:12px;margin-top:4px;color:var(--fg-muted,#57606a);',
+    })
+  const fieldGrid = (children: HTMLElement[]): HTMLElement =>
+    el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px 12px;' }, children)
+  function formField(label: string, control: HTMLElement, hint?: string): HTMLElement {
+    const wrap = el('label', { style: 'display:flex;flex-direction:column;gap:3px;font-size:12px;min-width:0;' })
+    wrap.append(el('span', { textContent: label, style: 'font-weight:600;' }), control)
+    if (hint) {
+      wrap.append(el('span', { textContent: hint, style: 'color:var(--fg-muted,#57606a);font-size:11.5px;' }))
+    }
+    return wrap
+  }
+  const textField = (placeholder = '', type = 'text'): HTMLInputElement =>
+    el('input', { type, placeholder, spellcheck: 'false', style: INPUT_CSS }) as HTMLInputElement
+  const numberField = (min: number): HTMLInputElement =>
+    el('input', { type: 'number', min: String(min), style: INPUT_CSS }) as HTMLInputElement
+  function selectField(options: string[]): HTMLSelectElement {
+    const select = el('select', { style: INPUT_CSS }) as HTMLSelectElement
+    for (const option of options) select.append(el('option', { value: option, textContent: option }))
+    return select
+  }
+  function checkField(label: string): { root: HTMLElement; input: HTMLInputElement } {
+    const input = el('input', { type: 'checkbox' }) as HTMLInputElement
+    const root = el('label', { style: 'display:flex;gap:6px;align-items:center;font-size:12px;cursor:pointer;' }, [
+      input,
+      el('span', { textContent: label }),
+    ])
+    return { root, input }
+  }
+
+  /* 浏览默认值 */
+  const maxRowsInput = numberField(1)
+  const maxPerPartInput = numberField(1)
+  const maxBytesInput = numberField(64)
+  const defaultClusterSelect = selectField([])
+
+  /* 集群编辑表单字段 */
+  const eName = textField('例如 prod-kafka')
+  const eId = textField('留空自动生成')
+  const eGroup = textField('可选，用于分组')
+  const eDesc = textField('可选')
+  const eBootstrap = textField('broker1:9092, broker2:9092')
+  const eSecurity = selectField(SECURITY_TYPES)
+  const eSasl = selectField(SASL_MECHANISMS)
+  const eAutoCreate = checkField('自动创建 topic')
+  const eConsumerGroup = textField('留空自动生成')
+  const eDialTimeout = numberField(1)
+  const eRequestTimeout = numberField(1)
+  const eMaxBytes = numberField(1)
+
+  const eKrb5 = textField('krb5.conf 路径')
+  const eCcache = textField('ccache 路径')
+  const eKeytab = textField('keytab 路径')
+  const ePrincipal = textField('user@REALM')
+  const eKinit = textField('留空自动探测')
+  const eService = textField('默认 kafka')
+  const eAutoKinit = checkField('自动执行 kinit 取票')
+
+  const ePlainUser = textField('用户名')
+  const ePlainPass = textField('口令', 'password')
+  const eScramAuthz = textField('可选')
+
+  const eCa = textField('CA 证书 PEM 路径')
+  const eCert = textField('客户端证书 PEM 路径')
+  const eKey = textField('客户端私钥 PEM 路径')
+  const eSni = textField('默认取 broker 主机名')
+  const eInsecure = checkField('跳过证书校验（仅测试）')
+
+  const eExtra = el('textarea', {
+    rows: '3',
     spellcheck: 'false',
+    placeholder: 'key=value，每行一条，例如 ssl.ca.location=/path/ca.pem',
     style: INPUT_CSS + 'width:100%;font-family:ui-monospace,monospace;',
   }) as HTMLTextAreaElement
-  const defaultClusterInput = el('input', { type: 'text', style: INPUT_CSS + 'width:200px;', placeholder: '留空取第一个' }) as HTMLInputElement
-  const saveBtn = el('button', { type: 'button', textContent: '保存集群配置', style: BTN_PRIMARY_CSS }) as HTMLButtonElement
-  const validateBtn = el('button', { type: 'button', textContent: '校验 JSON', style: BTN_CSS }) as HTMLButtonElement
-  const configPreviewWrap = el('div', { style: 'overflow:auto;max-height:200px;' })
-  const configPreviewTable = el('table', { style: TABLE_CSS })
-  configPreviewWrap.append(configPreviewTable)
-  const configMessage = el('div', { style: 'font-size:12px;color:var(--fg-muted,#57606a);' })
+
+  const saslField = formField('SASL 机制', eSasl)
+  const krbSection = el('div', { style: 'display:none;flex-direction:column;gap:8px;' }, [
+    sectionTitle('Kerberos'),
+    fieldGrid([
+      formField('krb5.conf 路径', eKrb5),
+      formField('ccache 路径', eCcache, '留空按 principal 生成临时 ccache'),
+      formField('keytab 路径', eKeytab),
+      formField('principal', ePrincipal, '自动 kinit 时必须带 @REALM'),
+      formField('kinit 路径', eKinit),
+      formField('SPN 服务名', eService, '默认 kafka'),
+    ]),
+    eAutoKinit.root,
+  ])
+  const plainSection = el('div', { style: 'display:none;flex-direction:column;gap:8px;' }, [
+    sectionTitle('SASL 口令'),
+    fieldGrid([
+      formField('用户名', ePlainUser),
+      formField('口令', ePlainPass),
+      formField('SCRAM authzId', eScramAuthz),
+    ]),
+  ])
+  const tlsSection = el('div', { style: 'display:none;flex-direction:column;gap:8px;' }, [
+    sectionTitle('TLS'),
+    fieldGrid([
+      formField('CA 证书', eCa),
+      formField('客户端证书', eCert),
+      formField('客户端私钥', eKey),
+      formField('SNI 主机名', eSni),
+    ]),
+    eInsecure.root,
+  ])
+
+  const eTitle = el('div', { style: 'font-weight:700;font-size:13px;' })
+  const eOkBtn = el('button', { type: 'button', textContent: '确定', style: BTN_PRIMARY_CSS }) as HTMLButtonElement
+  const eCancelBtn = el('button', { type: 'button', textContent: '取消', style: BTN_CSS }) as HTMLButtonElement
+
+  const editorBox = el('div', {
+    style: 'display:none;flex-direction:column;gap:8px;border:1px solid rgba(127,127,127,.35);' +
+      'border-radius:8px;padding:10px;background:var(--bg,#f6f8fa);',
+  }, [
+    eTitle,
+    sectionTitle('基本'),
+    fieldGrid([
+      formField('集群名称', eName),
+      formField('集群 id', eId, '省略时按名称 / 首个 broker 生成'),
+      formField('分组', eGroup),
+      formField('备注', eDesc),
+    ]),
+    formField('Bootstrap Servers', eBootstrap, '多个 broker 用逗号分隔'),
+    fieldGrid([
+      formField('最大消息字节', eMaxBytes),
+      formField('连接超时（毫秒）', eDialTimeout),
+      formField('请求超时（毫秒）', eRequestTimeout),
+      formField('Consumer Group', eConsumerGroup),
+    ]),
+    eAutoCreate.root,
+    sectionTitle('安全'),
+    fieldGrid([formField('安全类型', eSecurity), saslField]),
+    krbSection,
+    plainSection,
+    tlsSection,
+    sectionTitle('高级'),
+    formField('额外 librdkafka 配置（key=value）', eExtra, '每行一条；留空即不追加'),
+    el('div', { style: 'display:flex;gap:8px;justify-content:flex-end;' }, [eOkBtn, eCancelBtn]),
+  ])
+
+  /* 集群列表与操作 */
+  const clusterTable = el('table', { style: TABLE_CSS })
+  const clusterTableWrap = el('div', { style: 'overflow:auto;max-height:240px;' })
+  clusterTableWrap.append(clusterTable)
+
+  const addClusterBtn = el('button', { type: 'button', textContent: '＋ 新建集群', style: BTN_CSS }) as HTMLButtonElement
+  const saveConfigBtn = el('button', { type: 'button', textContent: '保存配置', style: BTN_PRIMARY_CSS }) as HTMLButtonElement
+  const reloadConfigBtn = el('button', { type: 'button', textContent: '重新加载', style: BTN_CSS }) as HTMLButtonElement
+  addClusterBtn.addEventListener('click', () => openEditor(-1, false))
+  saveConfigBtn.addEventListener('click', () => void saveConfig())
+  reloadConfigBtn.addEventListener('click', () => void refreshConfig())
+  eSecurity.addEventListener('change', syncEditorSections)
+  eSasl.addEventListener('change', syncEditorSections)
+  eOkBtn.addEventListener('click', applyEditor)
+  eCancelBtn.addEventListener('click', closeEditor)
 
   const configZone = el('div', {
-    style: 'border-top:1px solid rgba(127,127,127,.25);margin-top:8px;padding-top:8px;display:flex;flex-direction:column;gap:4px;',
+    style: 'border-top:1px solid rgba(127,127,127,.25);margin-top:8px;padding-top:8px;display:flex;flex-direction:column;gap:8px;',
   }, [
-    el('span', { style: LABEL_CSS, textContent: 'Kafka 集群配置（JSON 数组）' }),
-    el('span', {
-      style: HINT_CSS,
-      textContent:
-        '[{"id":"local","name":"本地","bootstrapServers":["127.0.0.1:9092"],"security":"PLAINTEXT",' +
-        '"sasl":"GSSAPI","krb":{"principal":"user@REALM","keytabPath":"C:/keys/user.keytab","autoKinit":true}}]；' +
-        '也兼容 Offset Explorer connections.json 的 PascalCase 字段',
-    }),
-    clustersInput,
-    el('span', { style: LABEL_CSS, textContent: '默认集群 id' }),
-    el('span', { style: HINT_CSS, textContent: '面板与 agent 工具省略 cluster 参数时使用；留空取第一个' }),
-    defaultClusterInput,
-    el('div', { style: 'display:flex;gap:8px;align-items:center;margin-top:6px;' }, [saveBtn, validateBtn]),
-    configMessage,
-    el('span', { style: LABEL_CSS, textContent: '解析预览' }),
-    configPreviewWrap,
+    sectionTitle('浏览默认值'),
+    fieldGrid([
+      formField('最大行数', maxRowsInput),
+      formField('每分区条数', maxPerPartInput),
+      formField('单条消息字节上限', maxBytesInput),
+      formField('默认集群', defaultClusterSelect),
+    ]),
+    sectionTitle('集群连接'),
+    el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [
+      addClusterBtn,
+      saveConfigBtn,
+      reloadConfigBtn,
+      cfgDirtyMark,
+    ]),
+    clusterTableWrap,
+    editorBox,
+    cfgStatus,
   ])
 
   /* 标题栏 */
@@ -1098,87 +1561,303 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     else if (key === 'health') await loadHealth()
   }
 
-  /* 配置 */
-  function parseClusterRows(raw: string): Array<Record<string, unknown>> {
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) throw new Error('必须是 JSON 数组')
-    return parsed as Array<Record<string, unknown>>
+  /* 配置（表单 ⇄ clusters JSON） */
+  let clusterDrafts: ClusterDraft[] = []
+  let editingIndex = -1
+  let editingSource: ClusterDraft | null = null
+  let configDirty = false
+
+  function setCfgStatus(text: string, isError = false): void {
+    cfgStatus.textContent = text
+    cfgStatus.setAttribute(
+      'style',
+      'font-size:12px;' + (isError ? STATUS_ERR : 'color:var(--fg-muted,#57606a);'),
+    )
   }
 
-  function renderConfigPreview(rows: Array<Record<string, unknown>>): void {
-    const table: TableRow[] = rows.map((row) => {
-      const servers = Array.isArray(row.bootstrapServers)
-        ? (row.bootstrapServers as unknown[]).join(',')
-        : typeof row.BootstrapServers === 'string'
-          ? row.BootstrapServers
-          : ''
+  function renderDirty(): void {
+    cfgDirtyMark.textContent = configDirty ? '● 有未保存的修改' : ''
+  }
+
+  function markDirty(): void {
+    configDirty = true
+    renderDirty()
+  }
+
+  function positiveInt(raw: string, fallback: number): number {
+    const value = Number(raw)
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback
+  }
+
+  function parseClustersText(raw: unknown): { rows: JsonRow[]; error?: string } {
+    if (Array.isArray(raw)) {
+      const rows = raw.map(rowOf).filter((row): row is JsonRow => row !== undefined)
+      return { rows }
+    }
+    if (typeof raw !== 'string' || raw.trim().length === 0) return { rows: [] }
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return { rows: [], error: 'clusters 不是数组' }
+      const rows = parsed.map(rowOf).filter((row): row is JsonRow => row !== undefined)
+      const skipped = parsed.length - rows.length
+      return { rows, error: skipped > 0 ? `${skipped} 项不是对象，已跳过` : undefined }
+    } catch (err) {
+      return { rows: [], error: `clusters 解析失败：${errText(err)}` }
+    }
+  }
+
+  function renderDefaultOptions(saved?: string): void {
+    const current = saved ?? defaultClusterSelect.value
+    defaultClusterSelect.textContent = ''
+    defaultClusterSelect.append(el('option', { value: '', textContent: '（取第一个）' }))
+    for (const draft of clusterDrafts) {
+      if (!draft.id) continue
+      defaultClusterSelect.append(el('option', { value: draft.id, textContent: draft.id }))
+    }
+    const exists = Array.from(defaultClusterSelect.options).some((option) => option.value === current)
+    defaultClusterSelect.value = exists ? current : ''
+  }
+
+  function renderConfigList(savedDefault?: string): void {
+    const rows: TableRow[] = clusterDrafts.map((draft, index) => {
+      const actions = el('div', { style: 'display:flex;gap:6px;' })
+      const action = (label: string, handler: () => void, danger = false): void => {
+        const btn = el('button', {
+          type: 'button',
+          textContent: label,
+          style: BTN_CSS + 'padding:2px 8px;font-size:11.5px;' + (danger ? 'color:#cf222e;' : ''),
+        }) as HTMLButtonElement
+        btn.addEventListener('click', handler)
+        actions.append(btn)
+      }
+      action('编辑', () => openEditor(index, false))
+      action('复制', () => openEditor(index, true))
+      action('删除', () => removeCluster(index), true)
+      const security = usesSasl(draft.security) ? `${draft.security} / ${draft.sasl}` : draft.security
       return {
         cells: [
-          String(row.id ?? row.Id ?? row.name ?? row.Name ?? '(未命名)'),
-          servers || '(缺少 bootstrapServers)',
-          String(row.security ?? row.Security ?? 'PLAINTEXT'),
-          String(row.sasl ?? row.SASL ?? 'GSSAPI'),
+          draft.name || '(未命名)',
+          draft.id || '—',
+          draft.bootstrap || '(未填写)',
+          security,
+          actions,
         ],
       }
     })
-    renderTable(configPreviewTable, ['id', 'bootstrap servers', 'security', 'sasl'], table)
+    renderTable(clusterTable, ['名称', 'id', 'Bootstrap Servers', '安全', '操作'], rows)
+    renderDefaultOptions(savedDefault)
+  }
+
+  function syncEditorSections(): void {
+    const security = eSecurity.value
+    const sasl = usesSasl(security)
+    saslField.style.display = sasl ? '' : 'none'
+    krbSection.style.display = sasl && eSasl.value === 'GSSAPI' ? 'flex' : 'none'
+    plainSection.style.display = sasl && eSasl.value !== 'GSSAPI' ? 'flex' : 'none'
+    tlsSection.style.display = usesTls(security) ? 'flex' : 'none'
+  }
+
+  function fillEditor(draft: ClusterDraft): void {
+    eName.value = draft.name
+    eId.value = draft.id
+    eGroup.value = draft.group
+    eDesc.value = draft.description
+    eBootstrap.value = draft.bootstrap
+    eSecurity.value = draft.security
+    eSasl.value = draft.sasl
+    eAutoCreate.input.checked = draft.allowAutoCreateTopic
+    eConsumerGroup.value = draft.consumerGroup
+    eDialTimeout.value = String(draft.dialTimeoutMs)
+    eRequestTimeout.value = String(draft.requestTimeoutMs)
+    eMaxBytes.value = String(draft.maxMessageBytes)
+    eKrb5.value = draft.krb.krb5ConfPath
+    eCcache.value = draft.krb.ccachePath
+    eKeytab.value = draft.krb.keytabPath
+    ePrincipal.value = draft.krb.principal
+    eKinit.value = draft.krb.kinitPath
+    eService.value = draft.krb.service
+    eAutoKinit.input.checked = draft.krb.autoKinit
+    ePlainUser.value = draft.plainUser
+    ePlainPass.value = draft.plainPass
+    eScramAuthz.value = draft.scramAuthzId
+    eCa.value = draft.tls.caPemPath
+    eCert.value = draft.tls.clientCertPemPath
+    eKey.value = draft.tls.clientKeyPemPath
+    eSni.value = draft.tls.serverName
+    eInsecure.input.checked = draft.tls.insecureSkipVerify
+    eExtra.value = draft.extraConfig
+    syncEditorSections()
+  }
+
+  function openEditor(index: number, copy: boolean): void {
+    if (!channel.writable) {
+      setCfgStatus('✘ 当前为只读模式（宿主未提供配置表单服务），无法编辑', true)
+      return
+    }
+    const source = index >= 0 ? clusterDrafts[index] : undefined
+    const draft = source ? cloneDraft(source) : blankDraft()
+    if (copy) {
+      draft.name = draft.name ? `${draft.name}（副本）` : draft.name
+      draft.id = `${draft.id || slugId(draft.name) || 'cluster'}-copy`
+    }
+    editingIndex = copy ? -1 : index
+    editingSource = draft
+    eTitle.textContent = copy
+      ? `复制集群：${source?.name || source?.id || ''}`
+      : index >= 0
+        ? `编辑集群：${source?.name || source?.id || ''}`
+        : '新建集群'
+    fillEditor(draft)
+    editorBox.style.display = 'flex'
+    eName.focus()
+  }
+
+  function closeEditor(): void {
+    editorBox.style.display = 'none'
+    editingIndex = -1
+    editingSource = null
+  }
+
+  /** 表单当前值 → 草稿；未在表单出现的字段从编辑前的原始配置里保留。 */
+  function collectDraft(): ClusterDraft {
+    const draft = editingSource ? cloneDraft(editingSource) : blankDraft()
+    draft.name = eName.value.trim()
+    draft.id = eId.value.trim() || slugId(draft.name) || slugId(splitServers(eBootstrap.value)[0] ?? '') || 'cluster'
+    draft.group = eGroup.value.trim()
+    draft.description = eDesc.value.trim()
+    draft.bootstrap = eBootstrap.value.trim()
+    draft.security = eSecurity.value
+    draft.sasl = eSasl.value
+    draft.allowAutoCreateTopic = eAutoCreate.input.checked
+    draft.consumerGroup = eConsumerGroup.value.trim()
+    draft.dialTimeoutMs = positiveInt(eDialTimeout.value, 10_000)
+    draft.requestTimeoutMs = positiveInt(eRequestTimeout.value, 20_000)
+    draft.maxMessageBytes = positiveInt(eMaxBytes.value, 1024 * 1024)
+    draft.krb = {
+      ...draft.krb,
+      krb5ConfPath: eKrb5.value.trim(),
+      ccachePath: eCcache.value.trim(),
+      keytabPath: eKeytab.value.trim(),
+      principal: ePrincipal.value.trim(),
+      kinitPath: eKinit.value.trim(),
+      service: eService.value.trim(),
+      autoKinit: eAutoKinit.input.checked,
+    }
+    draft.plainUser = ePlainUser.value.trim()
+    draft.plainPass = ePlainPass.value
+    draft.scramAuthzId = eScramAuthz.value.trim()
+    draft.tls = {
+      ...draft.tls,
+      caPemPath: eCa.value.trim(),
+      clientCertPemPath: eCert.value.trim(),
+      clientKeyPemPath: eKey.value.trim(),
+      serverName: eSni.value.trim(),
+      insecureSkipVerify: eInsecure.input.checked,
+    }
+    draft.extraConfig = eExtra.value
+    return draft
+  }
+
+  function applyEditor(): void {
+    const draft = collectDraft()
+    const problem = validateDraft(draft)
+    if (problem) {
+      setCfgStatus(`✘ ${problem}`, true)
+      return
+    }
+    const extra = linesToExtraConfig(draft.extraConfig)
+    if (extra.error) {
+      setCfgStatus(`✘ 高级配置：${extra.error}`, true)
+      return
+    }
+    const taken = new Set(
+      clusterDrafts.filter((_, index) => index !== editingIndex).map((row) => row.id),
+    )
+    const baseId = draft.id
+    for (let n = 2; taken.has(draft.id); n += 1) draft.id = `${baseId}-${n}`
+    if (editingIndex >= 0) clusterDrafts[editingIndex] = draft
+    else clusterDrafts.push(draft)
+    closeEditor()
+    renderConfigList()
+    markDirty()
+    setCfgStatus(`✔ ${draft.name} 已加入列表，点“保存配置”写入宿主`)
+  }
+
+  function removeCluster(index: number): void {
+    const draft = clusterDrafts[index]
+    if (!draft) return
+    const label = draft.name || draft.id
+    if (!window.confirm(`删除集群“${label}”？保存配置后生效。`)) return
+    clusterDrafts.splice(index, 1)
+    if (editingIndex === index) closeEditor()
+    else if (editingIndex > index) editingIndex -= 1
+    renderConfigList()
+    markDirty()
+    setCfgStatus(`已删除 ${label}，点“保存配置”生效`)
   }
 
   async function refreshConfig(): Promise<void> {
     try {
       const value = await channel.read()
-      if (typeof value.clusters === 'string') clustersInput.value = value.clusters
-      defaultClusterInput.value = value.defaultCluster ?? ''
-      try {
-        renderConfigPreview(parseClusterRows(clustersInput.value || '[]'))
-      } catch {
-        renderTable(configPreviewTable, ['id', 'bootstrap servers', 'security', 'sasl'], [])
-      }
-      configMessage.textContent = ''
-      configMessage.setAttribute('style', 'font-size:12px;color:var(--fg-muted,#57606a);')
+      const parsed = parseClustersText(value.clusters)
+      clusterDrafts = parsed.rows.map(draftFromRow)
+      maxRowsInput.value = String(value.maxRows ?? defaults.maxRows)
+      maxPerPartInput.value = String(value.maxPerPartition ?? defaults.maxPerPartition)
+      maxBytesInput.value = String(value.maxValueBytes ?? defaults.maxValueBytes)
+      renderConfigList(value.defaultCluster ?? '')
+      closeEditor()
+      configDirty = false
+      renderDirty()
+      addClusterBtn.disabled = !channel.writable
+      saveConfigBtn.disabled = !channel.writable
+      if (parsed.error) setCfgStatus(`⚠ ${parsed.error}`, true)
+      else if (!channel.writable) setCfgStatus('当前为只读模式（宿主未提供配置表单服务）', true)
+      else setCfgStatus('')
     } catch (err) {
-      clustersInput.value = clustersInput.value || '[]'
-      configMessage.textContent = `读取配置失败：${errText(err)}`
-      configMessage.setAttribute('style', 'font-size:12px;' + STATUS_ERR)
+      clusterDrafts = []
+      renderConfigList('')
+      closeEditor()
+      setCfgStatus(`读取配置失败：${errText(err)}`, true)
     }
-  }
-
-  function validateConfig(): Array<Record<string, unknown>> {
-    const rows = parseClusterRows(clustersInput.value.trim() || '[]')
-    rows.forEach((row, index) => {
-      const servers = row.bootstrapServers ?? row.BootstrapServers
-      const ok =
-        (Array.isArray(servers) && servers.length > 0) ||
-        (typeof servers === 'string' && servers.trim().length > 0)
-      if (!ok) throw new Error(`第 ${index + 1} 项缺少 bootstrapServers`)
-      const security = String(row.security ?? row.Security ?? 'PLAINTEXT').toUpperCase()
-      if (!['PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL'].includes(security)) {
-        throw new Error(`第 ${index + 1} 项 security 无效：${security}`)
-      }
-    })
-    return rows
   }
 
   async function saveConfig(): Promise<void> {
-    let rows: Array<Record<string, unknown>>
-    try {
-      rows = validateConfig()
-    } catch (err) {
-      configMessage.textContent = `clusters JSON 无效：${errText(err)}`
-      configMessage.setAttribute('style', 'font-size:12px;' + STATUS_ERR)
+    if (!channel.writable) {
+      setCfgStatus('✘ 当前为只读模式（宿主未提供配置表单服务），无法保存', true)
       return
     }
-    const raw = clustersInput.value.trim() || '[]'
+    const problems: string[] = []
+    const rows: JsonRow[] = []
+    clusterDrafts.forEach((draft, index) => {
+      const problem = validateDraft(draft)
+      if (problem) problems.push(`第 ${index + 1} 个集群（${draft.name || draft.id}）：${problem}`)
+      const extra = linesToExtraConfig(draft.extraConfig)
+      if (extra.error) problems.push(`第 ${index + 1} 个集群高级配置：${extra.error}`)
+      rows.push(draftToRow(draft))
+    })
+    if (problems.length > 0) {
+      setCfgStatus(`✘ ${problems.join('；')}`, true)
+      return
+    }
+    const maxRows = positiveInt(maxRowsInput.value, defaults.maxRows)
+    const maxPerPartition = positiveInt(maxPerPartInput.value, defaults.maxPerPartition)
+    const maxValueBytes = positiveInt(maxBytesInput.value, defaults.maxValueBytes)
     try {
-      await channel.write({ clusters: raw, defaultCluster: defaultClusterInput.value.trim() })
-      configMessage.textContent = '✔ 配置已保存（volatile 热更新，无需重启）'
-      configMessage.setAttribute('style', 'font-size:12px;' + STATUS_OK)
-      renderConfigPreview(rows)
+      await channel.write({
+        clusters: JSON.stringify(rows, null, 2),
+        defaultCluster: defaultClusterSelect.value,
+        maxRows,
+        maxPerPartition,
+        maxValueBytes,
+      })
+      defaults = { maxRows, maxPerPartition, maxValueBytes }
+      configDirty = false
+      renderDirty()
+      setCfgStatus('✔ 配置已保存（热更新，无需重启）')
       await loadClusters()
       if (activeTab === 'topics') await loadTopics()
     } catch (err) {
-      configMessage.textContent = `保存失败：${errText(err)}`
-      configMessage.setAttribute('style', 'font-size:12px;' + STATUS_ERR)
+      setCfgStatus(`保存失败：${errText(err)}`, true)
     }
   }
 
@@ -1197,17 +1876,6 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     else if (activeTab === 'topics') void loadTopics()
     else void switchTab(activeTab)
   })
-  validateBtn.addEventListener('click', () => {
-    try {
-      renderConfigPreview(validateConfig())
-      configMessage.textContent = '✔ JSON 格式正确'
-      configMessage.setAttribute('style', 'font-size:12px;' + STATUS_OK)
-    } catch (err) {
-      configMessage.textContent = `✘ ${errText(err)}`
-      configMessage.setAttribute('style', 'font-size:12px;' + STATUS_ERR)
-    }
-  })
-  saveBtn.addEventListener('click', () => void saveConfig())
   clusterSelect.addEventListener('change', () => {
     selectedTopic = ''
     topicDetailBox.style.display = 'none'

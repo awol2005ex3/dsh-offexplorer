@@ -127,7 +127,7 @@ export function createRpcDispatcher(
       throw new Error(
         snap.clusterError
           ? `未配置可用集群：${snap.clusterError}（设置 → 插件 → Offset Explorer）`
-          : '未配置 Kafka 集群（设置 → 插件 → Offset Explorer，clusters 为 JSON 数组）',
+          : '未配置 Kafka 集群（设置 → 插件 → Offset Explorer 添加集群）',
       )
     }
     const wanted = str(args, 'cluster') || snap.defaultCluster
