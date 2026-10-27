@@ -125,6 +125,11 @@ check(
   ),
 )
 check('注册了 1 个 kafka 工具', registeredTools.length === 1 && registeredTools[0].name === 'kafka')
+check(
+  'kafka 工具的 endpoint 是枚举（与路由清单一致）',
+  Array.isArray(registeredTools[0]?.parameters?.properties?.endpoint?.enum) &&
+    registeredTools[0].parameters.properties.endpoint.enum.length === registeredRoutes.length,
+)
 
 // ── 通过 Fetch 路由调用 RPC（绕过 HTTP，直接调 fetch handler） ──
 const route = (path) => registeredRoutes.find((r) => r.path === path)

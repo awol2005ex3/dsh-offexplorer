@@ -16,29 +16,37 @@ export function createKafkaTool(dispatch: RpcDispatch) {
   return defineTool({
     name: 'kafka',
     description: [
-      'Operate Kafka clusters configured in the dsh-offexplorer plugin',
-      '(brokers/topics/partitions/messages/consumer groups/configs/health/kerberos).',
-      'Pass `endpoint` (one of: ' + RPC_ENDPOINTS.join(', ') + ') and `args` matching it.',
-      'Examples: {endpoint:"topics",args:{}} · {endpoint:"topicDetail",args:{topic:"orders"}} ·',
-      '{endpoint:"browse",args:{topic:"orders",start:"NEWEST",limit:20}} ·',
-      '{endpoint:"produce",args:{topic:"orders",value:"hello"}} · {endpoint:"clusters",args:{}}.',
-      'Omitting `cluster` uses the default cluster; GSSAPI clusters run kinit automatically when autoKinit is set.',
+      'Operate Kafka clusters configured in dsh-offexplorer (设置 → 插件 → Offset Explorer).',
+      'Call {endpoint:"clusters"} first to list configured cluster ids and the default.',
+      'Pass `endpoint` plus `args`; omit `cluster` to use the default cluster.',
+      'Required args — clusters/version/ping/clusterInfo/brokers/topics/groups/health/kinit: none;',
+      'topicDetail/topicConfigs: {topic}; watermarks: {topic,partition};',
+      'browse: {topic, partitions?, start?: OLDEST|NEWEST|SPECIFIC|TIMESTAMP, offset?, limit?, perPartition?, maxValueBytes?};',
+      'brokerConfigs: {brokerId}; groupDetail: {group}; produce: {topic,value, key?, partition?};',
+      'createTopic: {name,partitions,replication}; deleteTopic: {name}; increasePartitions: {name,newCount}.',
+      'Examples: {endpoint:"topics",args:{}} · {endpoint:"browse",args:{topic:"orders",start:"NEWEST",limit:20}} ·',
+      '{endpoint:"produce",args:{topic:"orders",value:"hello"}}.',
+      'produce/createTopic/deleteTopic/increasePartitions mutate the cluster — confirm with the user first.',
+      'GSSAPI clusters run kinit automatically when autoKinit is set.',
     ].join(' '),
     parameters: {
       endpoint: {
         type: 'string',
         required: true,
-        description: `RPC endpoint, one of: ${RPC_ENDPOINTS.join(', ')}`,
+        enum: [...RPC_ENDPOINTS],
+        description: 'RPC endpoint to call.',
       },
       args: {
         type: 'object',
         additionalProperties: true,
         description:
-          'Endpoint arguments (topic, group, partition, partitions, start, limit, perPartition, name, value, key, ...).',
+          'Endpoint arguments. See required-args list in the tool description ' +
+          '(topic, group, brokerId, partition, partitions, start, offset, limit, perPartition, ' +
+          'maxValueBytes, name, newCount, partitions, replication, value, key).',
       },
       cluster: {
         type: 'string',
-        description: 'Cluster id. Defaults to the plugin default cluster.',
+        description: 'Cluster id from endpoint "clusters". Defaults to the plugin default cluster.',
       },
     },
     output: {
@@ -63,9 +71,6 @@ export function createKafkaTool(dispatch: RpcDispatch) {
     async execute(args, exec) {
       if (exec.signal?.aborted) throw new Error('Cancelled')
       const endpoint = String(args.endpoint ?? '')
-      if (!RPC_ENDPOINTS.includes(endpoint as (typeof RPC_ENDPOINTS)[number])) {
-        throw new Error(`unknown endpoint "${endpoint}". Valid: ${RPC_ENDPOINTS.join(', ')}`)
-      }
       const rpcArgs: Record<string, unknown> =
         typeof args.args === 'object' && args.args !== null
           ? { ...(args.args as Record<string, unknown>) }

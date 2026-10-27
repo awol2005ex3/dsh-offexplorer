@@ -77,6 +77,23 @@ Windows 上首次构建会编译 vendored 的 librdkafka，耗时较长。
 | `produce` / `createTopic` / `deleteTopic` / `increasePartitions` | 写入与管理 |
 | `health` | 离线分区 / 副本不足 / 离线副本巡检 |
 
+## Agent 工具
+
+宿主半注册一个名为 `kafka` 的 agent 工具，参数为 `{ endpoint, args, cluster? }`，
+直接复用上面的 RPC 分发器（与面板同一条校验路径）。省略 `cluster` 时用默认集群。
+`endpoint` 在 schema 里是枚举，传错会被参数校验直接拒绝。
+
+```
+列出已配置的 Kafka 集群          → {endpoint:"clusters"}
+orders 有哪些分区                → {endpoint:"topicDetail",args:{topic:"orders"}}
+看看 orders 最新 20 条消息       → {endpoint:"browse",args:{topic:"orders",start:"NEWEST",limit:20}}
+检查集群健康                     → {endpoint:"health"}
+往 orders 发一条 hello           → {endpoint:"produce",args:{topic:"orders",value:"hello"}}
+```
+
+`produce` / `createTopic` / `deleteTopic` / `increasePartitions` 会改动集群，
+工具描述里要求模型先与用户确认。GSSAPI 集群在 `autoKinit` 打开时自动 kinit。
+
 ## Windows Kerberos 说明
 
 `rust/vendor/rdkafka-sys` 是打过补丁的 rdkafka-sys 4.10（librdkafka 2.12.1）：
