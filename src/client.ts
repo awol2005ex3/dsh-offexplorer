@@ -774,7 +774,7 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     placeholder: '过滤主题（支持子串）',
     style: INPUT_CSS + 'width:240px;',
   }) as HTMLInputElement
-  const topicsWrap = el('div', { style: 'overflow:auto;max-height:260px;' })
+  const topicsWrap = el('div', { style: 'overflow:auto;max-height:400px;' })
   const topicsTable = el('table', { style: TABLE_CSS })
   topicsWrap.append(topicsTable)
 
