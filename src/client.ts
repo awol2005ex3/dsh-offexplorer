@@ -767,8 +767,10 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
 
   const viewHost = el('div', { style: 'display:flex;flex-direction:column;gap:8px;min-height:120px;' })
 
-  /* —— 主题 —— */
+  /* —— 主题：列表页 / 详情页分开 —— */
   const topicsView = el('div', { style: 'display:flex;flex-direction:column;gap:8px;' })
+
+  const topicListView = el('div', { style: 'display:flex;flex-direction:column;gap:8px;' })
   const topicFilter = el('input', {
     type: 'search',
     placeholder: '过滤主题（支持子串）',
@@ -777,11 +779,17 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
   const topicsWrap = el('div', { style: 'overflow:auto;max-height:400px;' })
   const topicsTable = el('table', { style: TABLE_CSS })
   topicsWrap.append(topicsTable)
+  topicListView.append(
+    el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [topicFilter]),
+    topicsWrap,
+  )
 
-  const topicDetailBox = el('div', {
-    style: 'display:none;border-top:1px solid rgba(127,127,127,.25);padding-top:8px;' +
-      'flex-direction:column;gap:8px;',
-  })
+  const topicDetailView = el('div', { style: 'display:none;flex-direction:column;gap:8px;' })
+  const topicBackBtn = el('button', {
+    type: 'button',
+    textContent: '← 主题列表',
+    style: BTN_CSS + 'flex-shrink:0;',
+  }) as HTMLButtonElement
   const topicTitle = el('div', { style: 'font-weight:700;font-size:13.5px;' })
   const topicMeta = el('div', { style: 'font-size:12px;color:var(--fg-muted,#57606a);' })
   const partitionsWrap = el('div', { style: 'overflow:auto;max-height:220px;' })
@@ -845,8 +853,12 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
   }) as HTMLInputElement
   const produceBtn = el('button', { type: 'button', textContent: '发送消息', style: BTN_PRIMARY_CSS }) as HTMLButtonElement
 
-  topicDetailBox.append(
-    el('div', { style: 'display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;' }, [topicTitle, topicMeta]),
+  topicDetailView.append(
+    el('div', { style: 'display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;' }, [
+      topicBackBtn,
+      topicTitle,
+      topicMeta,
+    ]),
     partitionsWrap,
     el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [
       el('span', { textContent: '起始' }),
@@ -875,11 +887,7 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     topicConfigsBox,
   )
 
-  topicsView.append(
-    el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;' }, [topicFilter]),
-    topicsWrap,
-    topicDetailBox,
-  )
+  topicsView.append(topicListView, topicDetailView)
 
   /* —— 消费者组 —— */
   const groupsView = el('div', { style: 'display:none;flex-direction:column;gap:8px;' })
@@ -1242,9 +1250,16 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     }
   }
 
+  function showTopicList(): void {
+    selectedTopic = ''
+    topicDetailView.style.display = 'none'
+    topicListView.style.display = 'flex'
+  }
+
   async function openTopic(name: string): Promise<void> {
     selectedTopic = name
-    topicDetailBox.style.display = 'flex'
+    topicListView.style.display = 'none'
+    topicDetailView.style.display = 'flex'
     topicTitle.textContent = `📄 ${name}`
     topicMeta.textContent = '加载中…'
     partitionsTable.textContent = ''
@@ -1306,6 +1321,11 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     } catch (err) {
       renderTable(topicConfigsTable, ['配置项', '值'], [{ cells: [`读取失败：${errText(err)}`] }])
     }
+  }
+
+  async function reloadTopicView(): Promise<void> {
+    if (selectedTopic) await openTopic(selectedTopic)
+    else await loadTopics()
   }
 
   function parsePartitions(raw: string): number[] {
@@ -1555,7 +1575,7 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     groupsView.style.display = key === 'groups' ? 'flex' : 'none'
     brokersView.style.display = key === 'brokers' ? 'flex' : 'none'
     healthView.style.display = key === 'health' ? 'flex' : 'none'
-    if (key === 'topics') await loadTopics()
+    if (key === 'topics') await reloadTopicView()
     else if (key === 'groups') await loadGroups()
     else if (key === 'brokers') await loadBrokers()
     else if (key === 'health') await loadHealth()
@@ -1855,7 +1875,7 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
       renderDirty()
       setCfgStatus('✔ 配置已保存（热更新，无需重启）')
       await loadClusters()
-      if (activeTab === 'topics') await loadTopics()
+      if (activeTab === 'topics') await reloadTopicView()
     } catch (err) {
       setCfgStatus(`保存失败：${errText(err)}`, true)
     }
@@ -1867,18 +1887,18 @@ function buildPanel(channel: SettingsChannel, rpcConn: any): PanelHandle {
     timestampInput.style.display = startSelect.value === 'TIMESTAMP' ? '' : 'none'
   })
   topicFilter.addEventListener('input', () => renderTopics())
+  topicBackBtn.addEventListener('click', () => showTopicList())
   browseBtn.addEventListener('click', () => void browseMessages())
   produceBtn.addEventListener('click', () => void produceMessage())
   pingBtn.addEventListener('click', () => void ping())
   kinitBtn.addEventListener('click', () => void kinit())
   refreshBtn.addEventListener('click', () => {
     if (chromeMode === 'config') void refreshConfig()
-    else if (activeTab === 'topics') void loadTopics()
+    else if (activeTab === 'topics') void reloadTopicView()
     else void switchTab(activeTab)
   })
   clusterSelect.addEventListener('change', () => {
-    selectedTopic = ''
-    topicDetailBox.style.display = 'none'
+    showTopicList()
     void switchTab(activeTab)
   })
   maximizeBtn.addEventListener('click', () => {
