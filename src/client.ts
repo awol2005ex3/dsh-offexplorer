@@ -2067,6 +2067,11 @@ function createSettingsComponent(React: any, handle: PanelHandle): any {
 }
 
 function tryRegisterSettingsSlot(ctx: any, handle: PanelHandle): boolean {
+  // mountedAt 在多次 register 调用（ctx.inject 异步回调 + 直接 service 兜底）之间共享，
+  // 且一旦任一插槽挂载，其余/重复的插槽一律跳过 —— 防止同一 id（dsh-offexplorer）被重复注册。
+  const mountedAt = new Set<string>()
+  let mounted = false
+
   const register = (slots: any): boolean => {
     if (!slots || typeof slots.inject !== 'function') return false
     let React: any
@@ -2075,13 +2080,11 @@ function tryRegisterSettingsSlot(ctx: any, handle: PanelHandle): boolean {
 
     const options = settingsSlotOptions()
     const priority = new Map(options.map(([name], index) => [name, index]))
-    const mountedAt = new Set<string>()
     const declared = (name: string): boolean => {
       if (typeof slots.specDynamic !== 'function') return false
       try { return Boolean(slots.specDynamic(name)) } catch { return false }
     }
     const Comp = createSettingsComponent(React, handle)
-    let mounted = false
 
     for (const [name, opts] of options) {
       try {
@@ -2089,7 +2092,8 @@ function tryRegisterSettingsSlot(ctx: any, handle: PanelHandle): boolean {
           for (const [other] of options) {
             if (priority.get(other)! < priority.get(name)! && declared(other)) return
           }
-          if (mountedAt.size > 0 && !mountedAt.has(name)) return
+          // 同一插槽已被本插件注册，或其它插槽已挂载 → 跳过，避免重复注册冲突。
+          if (mountedAt.has(name) || mountedAt.size > 0) return
           const slotOpts = Object.assign({ name }, opts)
           if (name === 'settings.section' && typeof opts.icon === 'function') {
             slotOpts.icon = opts.icon(React)
@@ -2107,7 +2111,6 @@ function tryRegisterSettingsSlot(ctx: any, handle: PanelHandle): boolean {
     return mounted
   }
 
-  let mounted = false
   try {
     if (typeof ctx?.inject === 'function') {
       ctx.inject(['slots'], (scope: any) => { if (register(scope?.slots)) mounted = true })
